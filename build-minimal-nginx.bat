@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-echo Building minimal Nginx Docker image...
+echo Building minimal Nginx Reverse Proxy Docker image...
 echo.
 
 REM Step 1: Create a build container
@@ -14,7 +14,7 @@ if %ERRORLEVEL% neq 0 (
 
 REM Step 2: Install build dependencies and compile Nginx from source
 echo Step 2: Installing build dependencies...
-docker exec nginx-builder apk add --no-cache gcc libc-dev make openssl-dev pcre-dev zlib-dev linux-headers wget
+docker exec nginx-builder apk add --no-cache gcc libc-dev make openssl-dev pcre-dev zlib-dev wget
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to install build dependencies
     goto cleanup
@@ -28,9 +28,9 @@ if %ERRORLEVEL% neq 0 (
     goto cleanup
 )
 
-REM Configure and build Nginx with minimal modules using standard paths
+REM Configure and build Nginx with modules needed for reverse proxy
 echo Building Nginx from source (this may take a few minutes)...
-docker exec nginx-builder sh -c "cd /tmp/nginx-1.24.0 && ./configure --prefix=/var/www --sbin-path=/usr/local/sbin/nginx --conf-path=/etc/nginx/nginx.conf --pid-path=/var/run/nginx.pid --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log --with-pcre --with-http_ssl_module --with-http_v2_module --without-http_scgi_module --without-http_uwsgi_module --without-http_fastcgi_module --without-http_geo_module --without-http_map_module --without-http_split_clients_module --without-http_referer_module --without-http_rewrite_module --without-http_proxy_module --without-http_memcached_module --without-mail_pop3_module --without-mail_imap_module --without-mail_smtp_module && make && make install"
+docker exec nginx-builder sh -c "cd /tmp/nginx-1.24.0 && ./configure --prefix=/var/www --sbin-path=/usr/local/sbin/nginx --conf-path=/etc/nginx/nginx.conf --pid-path=/var/run/nginx.pid --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log --with-pcre --with-http_ssl_module --with-http_v2_module --with-http_proxy_module --with-http_rewrite_module --with-http_fastcgi_module --with-http_uwsgi_module --with-http_scgi_module --without-http_geo_module --without-http_map_module --without-http_split_clients_module --without-http_referer_module --without-http_memcached_module --without-mail_pop3_module --without-mail_imap_module --without-mail_smtp_module && make && make install"
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to build Nginx
     goto cleanup
@@ -38,7 +38,20 @@ if %ERRORLEVEL% neq 0 (
 
 REM Step 3: Create a minimal filesystem structure with standard paths
 echo Step 3: Creating minimal filesystem structure...
-docker exec nginx-builder sh -c "mkdir -p /nginx-minimal/etc/nginx && mkdir -p /nginx-minimal/var/log/nginx && mkdir -p /nginx-minimal/var/run && mkdir -p /nginx-minimal/var/www && mkdir -p /nginx-minimal/usr/local/sbin && cp -r /etc/nginx/* /nginx-minimal/etc/nginx/ && cp /usr/local/sbin/nginx /nginx-minimal/usr/local/sbin/"
+docker exec nginx-builder sh -c "mkdir -p /nginx-minimal/etc/nginx /nginx-minimal/var/log/nginx /nginx-minimal/var/run /nginx-minimal/var/www /nginx-minimal/usr/local/sbin && cp /usr/local/sbin/nginx /nginx-minimal/usr/local/sbin/"
+
+REM Create a minimal mime.types file
+docker exec nginx-builder sh -c "echo 'types {' > /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    text/html                             html htm shtml;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    text/css                              css;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    text/javascript                       js;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    application/json                      json;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    image/jpeg                            jpeg jpg;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    image/png                             png;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    image/gif                             gif;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    image/svg+xml                         svg svgz;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '    application/pdf                       pdf;' >> /nginx-minimal/etc/nginx/mime.types"
+docker exec nginx-builder sh -c "echo '}' >> /nginx-minimal/etc/nginx/mime.types"
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to create filesystem structure
     goto cleanup
@@ -55,20 +68,22 @@ docker exec nginx-builder sh -c "mkdir -p /nginx-minimal/lib"
 docker exec nginx-builder sh -c "cp -v /lib/ld-musl-*.so.1 /nginx-minimal/lib/ 2>/dev/null || true"
 
 REM Copy required libraries - direct command approach
-docker exec nginx-builder sh -c "for lib in $(ldd /usr/local/sbin/nginx | grep '=>' | awk '{print $3}'); do if [ -f \"$lib\" ]; then mkdir -p /nginx-minimal$(dirname $lib); cp -v $lib /nginx-minimal$(dirname $lib)/; fi; done"
+docker exec nginx-builder sh -c "for lib in \$(ldd /usr/local/sbin/nginx | grep '=>' | awk '{print \$3}'); do if [ -f \"\$lib\" ]; then mkdir -p /nginx-minimal\$(dirname \$lib); cp -v \$lib /nginx-minimal\$(dirname \$lib)/; fi; done"
 
-REM Step 5: Create a basic nginx configuration
+REM Step 5: Creating default configuration...
 echo Step 5: Creating default configuration...
 
-REM Use echo inside the container to create the config file
+REM Create nginx.conf with individual echo commands (more reliable in Windows batch)
 docker exec nginx-builder sh -c "echo 'user nobody;' > /nginx-minimal/etc/nginx/nginx.conf"
-docker exec nginx-builder sh -c "echo 'worker_processes 1;' >> /nginx-minimal/etc/nginx/nginx.conf"
-docker exec nginx-builder sh -c "echo 'events { worker_connections 1024; }' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo 'worker_processes auto;' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo 'events {' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo '    worker_connections 1024;' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo '}' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo 'http {' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo '    include       mime.types;' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo '    default_type  application/octet-stream;' >> /nginx-minimal/etc/nginx/nginx.conf"
-docker exec nginx-builder sh -c "echo '    sendfile        on;' >> /nginx-minimal/etc/nginx/nginx.conf"
-docker exec nginx-builder sh -c "echo '    keepalive_timeout  65;' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo '    sendfile      on;' >> /nginx-minimal/etc/nginx/nginx.conf"
+docker exec nginx-builder sh -c "echo '    keepalive_timeout 65;' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo '' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo '    # Log configuration' >> /nginx-minimal/etc/nginx/nginx.conf"
 docker exec nginx-builder sh -c "echo '    access_log  /var/log/nginx/access.log;' >> /nginx-minimal/etc/nginx/nginx.conf"
@@ -85,7 +100,7 @@ docker exec nginx-builder sh -c "echo '    }' >> /nginx-minimal/etc/nginx/nginx.
 docker exec nginx-builder sh -c "echo '}' >> /nginx-minimal/etc/nginx/nginx.conf"
 
 REM Create a simple index.html file
-docker exec nginx-builder sh -c "mkdir -p /nginx-minimal/var/www && echo '<html><body><h1>Hello from minimal Nginx!</h1></body></html>' > /nginx-minimal/var/www/index.html"
+docker exec nginx-builder sh -c "mkdir -p /nginx-minimal/var/www && echo '<html><body><h1>It works!</h1></body></html>' > /nginx-minimal/var/www/index.html"
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to create configuration files
     goto cleanup
@@ -96,7 +111,7 @@ docker exec nginx-builder sh -c "chmod 755 /nginx-minimal/var/log/nginx && touch
 
 REM Step 6: Import the filesystem directly as a Docker image
 echo Step 6: Creating Docker image...
-docker exec nginx-builder sh -c "tar -C /nginx-minimal -cf - ." | docker import - --change "EXPOSE 80" --change "VOLUME [\"/etc/nginx\", \"/var/log/nginx\", \"/var/www\"]" --change "CMD [\"/usr/local/sbin/nginx\", \"-g\", \"daemon off;\", \"-c\", \"/etc/nginx/nginx.conf\"]" minimal-nginx
+docker exec nginx-builder sh -c "tar -C /nginx-minimal -cf - ." | docker import - --change "EXPOSE 80" --change "VOLUME [\"/etc/nginx\", \"/var/log/nginx\", \"/var/www\"]" --change "CMD [\"/usr/local/sbin/nginx\", \"-g\", \"daemon off;\", \"-c\", \"/etc/nginx/nginx.conf\"]" minimal-nginx-proxy
 if %ERRORLEVEL% neq 0 (
     echo Error: Failed to create Docker image
     goto cleanup
@@ -110,16 +125,18 @@ docker rm nginx-builder
 
 REM Show the image size
 echo.
-docker images minimal-nginx
+docker images minimal-nginx-proxy
 
 echo.
-echo Minimal Nginx Docker image created successfully!
+echo Minimal Nginx Reverse Proxy Docker image created successfully!
 echo.
 echo To run with default configuration:
-echo docker run -d -p 8080:80 --name nginx-server minimal-nginx
+echo docker run -d -p 80:80 --name nginx-proxy minimal-nginx-proxy
 echo.
-echo To run with custom configuration and persistent logs:
-echo docker run -d -p 8080:80 -v %cd%\nginx.conf:/etc/nginx/nginx.conf -v %cd%\logs:/var/log/nginx -v %cd%\www:/var/www --name nginx-server minimal-nginx
+echo To run with custom configuration:
+echo docker run -d -p 80:80 -v %cd%\nginx.conf:/etc/nginx/nginx.conf -v %cd%\logs:/var/log/nginx -v %cd%\www:/var/www --name nginx-proxy minimal-nginx-proxy
+echo.
+echo To use as a reverse proxy, edit the nginx.conf file.
 echo.
 
 endlocal
